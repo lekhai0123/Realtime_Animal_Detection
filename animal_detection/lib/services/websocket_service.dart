@@ -82,7 +82,7 @@ class WebSocketService {
   // ==============================
   void close() {
     try {
-      _channel?.sink.close(status.goingAway);
+      _channel?.sink.close(1000); // Normal Closure
     } catch (_) {}
     _connected = false;
   }

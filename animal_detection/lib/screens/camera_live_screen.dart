@@ -10,6 +10,7 @@ import '../widgets/bounding_box_overlay.dart';
 
 class CameraLiveScreen extends StatefulWidget {
   const CameraLiveScreen({super.key});
+
   @override
   State<CameraLiveScreen> createState() => _CameraLiveScreenState();
 }
@@ -38,7 +39,7 @@ class _CameraLiveScreenState extends State<CameraLiveScreen> {
   Future<void> _initCam() async {
     final cams = await availableCameras();
     final desc = cams.firstWhere(
-          (c) => c.lensDirection == CameraLensDirection.back,
+      (c) => c.lensDirection == CameraLensDirection.back,
       orElse: () => cams.first,
     );
     _cam = CameraController(desc, ResolutionPreset.medium, enableAudio: false);
@@ -57,22 +58,28 @@ class _CameraLiveScreenState extends State<CameraLiveScreen> {
     });
 
     // ✅ reconnect nếu đã đóng
-    _ws ??= WebSocketService("${ApiConfig.wsBase}/ws/detect");
+    _ws ??= WebSocketService(ApiConfig.wsDetect);
     _ws!.onData = (dets, fps, latency, data) {
-      final tClientRecv = DateTime.now().microsecondsSinceEpoch;
-      final tClientSend = data?['t_client_send'] ?? 0;
+      final tRecv = DateTime.now().millisecondsSinceEpoch;
+      final tSend = data?['t_client_send'] ?? 0;
       final tBackend = data?['t_backend'] ?? 0;
-      print("📊 Total RTT: ${(tClientRecv - tClientSend)/1000} ms | Backend: $tBackend ms");
-      final serverW = (data?['image_width'] ?? 0).toDouble();
-      final serverH = (data?['image_height'] ?? 0).toDouble();
+      final tBackendDone = data?['t_backend_done'] ?? tRecv;
+
+      final rtt = tRecv - tSend; // ms
+      final up = tBackendDone - tSend; // encode → server
+      final down = tRecv - tBackendDone; // server → client
+
+      print(
+        "📊 RTT=$rtt ms | Up=$up ms | Down=$down ms | Backend=$tBackend ms",
+      );
 
       setState(() {
         _detections = dets;
         _fps = fps;
         _latency = latency;
         _awaitingResponse = false;
-        _imageW = serverW;
-        _imageH = serverH;
+        _imageW = (data?['image_width'] ?? 1).toDouble();
+        _imageH = (data?['image_height'] ?? 1).toDouble();
       });
     };
 
@@ -81,22 +88,23 @@ class _CameraLiveScreenState extends State<CameraLiveScreen> {
 
     _cam!.startImageStream((image) async {
       if (!_streaming || _sending || _awaitingResponse) return;
-      final t0 = DateTime.now().microsecondsSinceEpoch;
+      final t0 = DateTime.now().millisecondsSinceEpoch;
       final now = DateTime.now();
       if (now.difference(_lastSend) < _interval) return;
       _lastSend = now;
       _sending = true;
 
       try {
-        final t1 = DateTime.now().microsecondsSinceEpoch;
+        final t1 = DateTime.now().millisecondsSinceEpoch;
         final jpg = await _yuv420ToJpegFast(image);
-        final t2 = DateTime.now().microsecondsSinceEpoch;
+        final t2 = DateTime.now().millisecondsSinceEpoch;
 
         _awaitingResponse = true;
         final angle = _cam!.description.sensorOrientation;
         String orientation = "portraitUp";
         try {
-          final deviceOri = await NativeDeviceOrientationCommunicator().orientation(useSensor: true);
+          final deviceOri = await NativeDeviceOrientationCommunicator()
+              .orientation(useSensor: true);
           orientation = deviceOri.name;
         } catch (_) {}
 
@@ -189,7 +197,9 @@ class _CameraLiveScreenState extends State<CameraLiveScreen> {
       future: _initFuture,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
-          return const Scaffold(body: Center(child: CircularProgressIndicator()));
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
         }
 
         final previewSize = _cam!.value.previewSize!;

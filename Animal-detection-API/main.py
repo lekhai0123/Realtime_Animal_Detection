@@ -50,43 +50,77 @@ def infer_loop(frame_q: Queue, result_q: Queue):
                       t_decode, t_rotate, t_infer1 - t_infer0,
                       t_track - t_infer1, t_track - t0))
 
+@app.get("/")
+def root():
+    return {"status": "YOLO Realtime API running", "ws": "/ws/detect"}
+
 @app.websocket("/ws/detect")
 async def detect_ws(ws: WebSocket):
     await ws.accept()
     sid = str(uuid.uuid4())[:6]
     print(f"[{sid}] Connected")
 
-    frame_q, result_q = Queue(maxsize=2), Queue(maxsize=2)
-    thread = threading.Thread(target=infer_loop, args=(frame_q, result_q), daemon=True)
+    frame_q = Queue(maxsize=2)
+    result_q = Queue(maxsize=2)
+
+    thread = threading.Thread(
+        target=infer_loop,
+        args=(frame_q, result_q),
+        daemon=True
+    )
     thread.start()
 
     try:
         while True:
-            msg = await ws.receive_text()
-            t0 = time.time() * 1000
-            data = json.loads(msg)
+            # -----------------------------
+            # 1) Nhận ảnh từ client
+            # -----------------------------
+            try:
+                msg = await ws.receive_text()
+            except:
+                print(f"[{sid}] client closed")
+                break
 
-            b64 = data.get("image")
+            data = json.loads(msg)
+            t0 = time.time() * 1000
+
+            frame = decode_base64_image(data.get("image"))
+            if frame is None:
+                print(f"[{sid}] decode error, continue")
+                continue
+
             angle = int(data.get("angle", 0))
             ori = data.get("device_orientation", "portraitUp")
-
-            frame = decode_base64_image(b64)
-            if frame is None:
-                continue
             t_decode = time.time() * 1000 - t0
+
             frame, mode = fix_rotation(frame, ori, angle)
             t_rotate = time.time() * 1000 - t0 - t_decode
 
+            # drop frame cũ nếu hàng đợi đầy
             if frame_q.full():
-                try: frame_q.get_nowait()
-                except: pass
+                try:
+                    frame_q.get_nowait()
+                except:
+                    pass
+
             frame_q.put((sid, frame, t_decode, t_rotate, t0))
 
+            # -----------------------------
+            # 2) Lấy kết quả infer
+            # -----------------------------
             try:
-                sid_r, tracked, decoded_w, decoded_h, t_decode, t_rotate, t_infer, t_track, t_total = result_q.get(timeout=2.0)
+                (
+                    sid_r, tracked, decoded_w, decoded_h,
+                    t_decode, t_rotate, t_infer, t_track, t_total
+                ) = result_q.get(timeout=4.0)
             except:
+                # KHÔNG đóng WebSocket
+                print(f"[{sid}] infer timeout, continue")
                 continue
 
+            # -----------------------------
+            # 3) Gửi kết quả về client
+            # -----------------------------
             dets = []
             for xyxy, cls_id, conf, tid in zip(
                 tracked.xyxy,
@@ -102,27 +136,27 @@ async def detect_ws(ws: WebSocket):
                     "track_id": int(tid) if tid is not None else None,
                 })
 
-            backend_t = t_total
-            print(f"[{sid}] decode={t_decode:.1f}ms, rotate={t_rotate:.1f}ms, "
-                  f"infer={t_infer:.1f}ms, track={t_track:.1f}ms, total={backend_t:.1f}ms")
+            t_backend_done = time.time() * 1000
 
             await ws.send_json({
                 "detections": dets,
-                "fps": round(1000 / backend_t, 2),
-                "latency_ms": round(backend_t, 2),
-                "t_backend": round(backend_t, 2),
-                "class_stats": {},
+                "fps": round(1000 / t_total, 2),
+                "latency_ms": round(t_total, 2),
+                "t_backend": round(t_total, 2),
+                "t_backend_done": t_backend_done,
+                "t_client_send": data.get("t_client_send", 0),
                 "image_width": decoded_w,
-                "image_height": decoded_h,
+                "image_height": decoded_h
             })
 
     except Exception as e:
         print(f"[{sid}] Error: {e}")
+
+    # ❗ KHÔNG đóng WebSocket trong mỗi vòng lặp!
     finally:
-        try:
-            frame_q.put(None)
-            if ws.client_state.name != "DISCONNECTED":
-                await ws.close()
-        except Exception:
-            pass
         print(f"[{sid}] Disconnected")
+        try:
+            ws.close()
+        except:
+            pass
+        frame_q.put(None)

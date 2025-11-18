@@ -1,7 +1,10 @@
 class ApiConfig {
-  static const String baseIp = "192.168.1.133"; // IP máy backend
-  static const int port = 8000;
+  // Cloudflare Tunnel domain
+  static const String baseUrl = "https://detect.ltk.id.vn";
 
-  static String get httpBase => "http://$baseIp:$port";
-  static String get wsBase => "ws://$baseIp:$port";
+  // HTTP base (FastAPI REST)
+  static String get httpBase => baseUrl;
+
+  // WebSocket endpoint
+  static String get wsDetect => "wss://detect.ltk.id.vn/ws/detect";
 }
